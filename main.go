@@ -2,9 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
@@ -17,13 +19,14 @@ type App struct {
 }
 
 func main() {
-	// Carrega o .env para desenvolvimento local. Em produção, isso não fará nada.
+	// Carrega o .env para desenvolvimento local.
+	// Em produção, as variáveis são fornecidas pelo ambiente.
 	_ = godotenv.Load()
 
 	// --- Configuração ---
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8001" // Porta padrão
+		port = "8001"
 	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -51,21 +54,29 @@ func main() {
 	// --- Rotas da API ---
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", app.healthHandler)
-
-	// Endpoint público para validar uma chave
 	mux.HandleFunc("/validate", app.validateKeyHandler)
+	mux.Handle(
+		"/admin/keys",
+		app.masterKeyAuthMiddleware(http.HandlerFunc(app.createKeyHandler)),
+	)
 
-	// Endpoints de "admin" para criar/gerenciar chaves
-	// Eles são protegidos pelo middleware de autenticação
-	mux.Handle("/admin/keys", app.masterKeyAuthMiddleware(http.HandlerFunc(app.createKeyHandler)))
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	log.Printf("Serviço de Autenticação (Go) rodando na porta %s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+	log.Println("Serviço de Autenticação iniciado")
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("Falha ao iniciar servidor HTTP: %v", err)
 	}
 }
 
-// connectDB inicializa e testa a conexão com o PostgreSQL
+// connectDB inicializa e testa a conexão com o PostgreSQL.
 func connectDB(databaseURL string) (*sql.DB, error) {
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
@@ -73,9 +84,10 @@ func connectDB(databaseURL string) (*sql.DB, error) {
 	}
 
 	if err = db.Ping(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 
-	log.Println("Conectado ao PostgreSQL com sucesso!")
+	log.Println("Conectado ao PostgreSQL com sucesso")
 	return db, nil
 }
